@@ -6,7 +6,7 @@ on:
       mode:
         description: How the bot commit is made
         type: choice
-        options: [api, git, none]
+        options: [api, git, none, prod]
         default: api
       author:
         description: Commit author in git mode
@@ -85,7 +85,44 @@ jobs:
              + (if $sha == "" then {} else {sha: $sha} end)' \
             | gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$FILE" --input - --jq '"commit \(.commit.sha)"'
 
+      # Same commands as the production docs step; only repo, base branch and file differ.
+      - name: Production mirror
+        if: inputs.mode == 'prod'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: bot/docs
+        run: |
+          base=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha)
+          gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$base" -F force=true >/dev/null 2>&1 \
+            || gh api "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$base" >/dev/null
+
+          jq -n --arg branch "$BRANCH" \
+            --arg sha "$(gh api "repos/$REPO/contents/generated.txt?ref=$BRANCH" --jq .sha)" \
+            --arg message "$(printf 'Update generated file\n\nSource commit: %s' "$GITHUB_SHA")" \
+            --rawfile content <(base64 -w0 generated.txt) \
+            '{message: $message, branch: $branch, sha: $sha, content: $content}' \
+            | gh api -X PUT "repos/$REPO/contents/generated.txt" --input - >/dev/null
+
+          pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          echo "open PR after commit: ${pr:-none}"
+          if [ -z "$pr" ]; then
+            url=$(gh pr create --title "Update generated file" --body "Automated update." --head "$BRANCH" --base main)
+            pr=${url##*/}
+          fi
+          echo "merging PR #$pr"
+
+          for attempt in 1 2 3 4 5 6; do
+            sleep 5
+            state=$(gh pr view "$pr" --json mergeable --jq .mergeable)
+            echo "attempt $attempt: mergeable=$state"
+            [ "$state" = MERGEABLE ] || continue
+            gh pr merge "$pr" --squash --admin && exit 0
+          done
+          exit 1
+
       - name: Open and merge pull request
+        if: inputs.mode != 'prod'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: bot/docs
