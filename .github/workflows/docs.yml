@@ -3,11 +3,20 @@ name: docs
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: How the bot commit is made
+        type: choice
+        options: [api, git]
+        default: api
       author:
-        description: Commit author for the bot commit
+        description: Commit author in git mode
         type: choice
         options: [actions, app]
         default: actions
+      merge:
+        description: Merge the pull request after updating it
+        type: boolean
+        default: true
 
 concurrency:
   group: docs
@@ -30,7 +39,11 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
-      - name: Commit, open and merge pull request
+      - name: Generate file
+        run: date -u +%Y-%m-%dT%H:%M:%SZ > generated.txt
+
+      - name: Commit with git
+        if: inputs.mode == 'git'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: bot/docs
@@ -45,15 +58,42 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           fi
-
           git checkout -B "$BRANCH"
-          date -u +%Y-%m-%dT%H:%M:%SZ > generated.txt
           git add generated.txt
           git commit -m "Update generated file"
           git push --force origin "$BRANCH"
 
+      # Commits made through the API with the app's token are signed by GitHub
+      # and authored by the app.
+      - name: Commit through the API
+        if: inputs.mode == 'api'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: bot/docs
+          FILE: generated.txt
+        run: |
+          base=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" -f sha="$base" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$base" >/dev/null
+          fi
+
+          current=$(gh api "repos/$GITHUB_REPOSITORY/contents/$FILE?ref=$BRANCH" --jq .sha 2>/dev/null || true)
+          jq -n --arg branch "$BRANCH" --arg sha "$current" --rawfile content <(base64 -w0 "$FILE") \
+            '{message: "Update generated file", branch: $branch, content: $content}
+             + (if $sha == "" then {} else {sha: $sha} end)' \
+            | gh api -X PUT "repos/$GITHUB_REPOSITORY/contents/$FILE" --input - --jq '"commit \(.commit.sha)"'
+
+      - name: Open and merge pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: bot/docs
+          MERGE: ${{ inputs.merge }}
+        run: |
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
             gh pr create --title "Update generated file" --body "Automated update." --head "$BRANCH" --base main
           fi
-
-          gh pr merge "$BRANCH" --squash --admin
+          if [ "$MERGE" = true ]; then
+            gh pr merge "$BRANCH" --squash --admin
+          fi
