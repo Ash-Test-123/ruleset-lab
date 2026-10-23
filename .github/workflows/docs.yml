@@ -6,7 +6,7 @@ on:
       mode:
         description: How the bot commit is made
         type: choice
-        options: [api, git]
+        options: [api, git, none]
         default: api
       author:
         description: Commit author in git mode
