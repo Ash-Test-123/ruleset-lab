@@ -93,6 +93,10 @@ jobs:
           REPO: ${{ github.repository }}
           BRANCH: bot/docs
         run: |
+          stale=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          echo "stale PR: ${stale:-none}"
+          [ -z "$stale" ] || gh pr close "$stale" --comment "Replaced by a newer update." >/dev/null
+
           base=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha)
           gh api -X PATCH "repos/$REPO/git/refs/heads/$BRANCH" -f sha="$base" -F force=true >/dev/null 2>&1 \
             || gh api "repos/$REPO/git/refs" -f ref="refs/heads/$BRANCH" -f sha="$base" >/dev/null
@@ -104,12 +108,8 @@ jobs:
             '{message: $message, branch: $branch, sha: $sha, content: $content}' \
             | gh api -X PUT "repos/$REPO/contents/generated.txt" --input - >/dev/null
 
-          pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
-          echo "open PR after commit: ${pr:-none}"
-          if [ -z "$pr" ]; then
-            url=$(gh pr create --title "Update generated file" --body "Automated update." --head "$BRANCH" --base main)
-            pr=${url##*/}
-          fi
+          url=$(gh pr create --title "Update generated file" --body "Automated update." --head "$BRANCH" --base main)
+          pr=${url##*/}
           echo "merging PR #$pr"
 
           for attempt in 1 2 3 4 5 6; do
