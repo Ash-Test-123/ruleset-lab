@@ -1,0 +1,59 @@
+name: docs
+
+on:
+  workflow_dispatch:
+    inputs:
+      author:
+        description: Commit author for the bot commit
+        type: choice
+        options: [actions, app]
+        default: actions
+
+concurrency:
+  group: docs
+  cancel-in-progress: false
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.LAB_APP_ID }}
+          private-key: ${{ secrets.LAB_APP_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Commit, open and merge pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: bot/docs
+          AUTHOR: ${{ inputs.author }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          if [ "$AUTHOR" = app ]; then
+            id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          fi
+
+          git checkout -B "$BRANCH"
+          date -u +%Y-%m-%dT%H:%M:%SZ > generated.txt
+          git add generated.txt
+          git commit -m "Update generated file"
+          git push --force origin "$BRANCH"
+
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --title "Update generated file" --body "Automated update." --head "$BRANCH" --base main
+          fi
+
+          gh pr merge "$BRANCH" --squash --admin
